@@ -1,126 +1,80 @@
-# Logseq Fork — Block Embed Rendering Improvement
+# Logseq Fork — `{{embed ((uuid))}}` Revival for Roam Research Compatibility
+
+> **Status:** Phase 1B complete. The original plan (improve a hypothetical `block_embed.cljs` pipeline) was overturned by Phase 1 investigation and re-scoped here. This document supersedes the v1 plan.
 
 ## 1. Project Overview
 
 ### Goal
-Fork Logseq and improve block embed (Transclusion) rendering to match Roam Research's behavior.
+Revive the deprecated `{{embed ((uuid))}}` macro so it renders the referenced block **and its full descendant subtree** inline in the page, matching Roam Research's transclusion behavior — by routing the macro through Logseq's existing, working `:block/link` embed rendering pipeline rather than building any new pipeline.
 
 ### Background
-The user built a Digital Zettelkasten in Roam Research using its 5 fundamental features (Daily Notes, Nesting, Pages, Hashtags, Block References & Transclusion). They are migrating to Logseq, but block embed rendering — specifically full recursive child tree display and inline editing — does not match Roam's quality. This is the critical gap.
+The user has a Digital Zettelkasten built in Roam Research. Roam uses `{{embed ((block-uid))}}` for block transclusion: it renders the referenced block and all descendants as a full recursive tree, inline-editable, with edits propagating to the original. When this data lands in Logseq, every `{{embed ((uuid))}}` renders only a deprecation warning ("{{embed}} is deprecated. Use '/Node embed' command instead.") — so the user's notes do not display the way they did in Roam.
+
+### Technical Reality (corrected from Phase 1)
+- **No re-frame.** Logseq uses a custom reactivity layer: `db.react/react/q`, `db.hooks/use-query`, `db.model/sub-block`, plus a core.async event bus (`state/pub-event!` → `defmulti handle`). The original plan's "re-frame subscriptions" assumption was wrong.
+- **No `block_embed.cljs`.** The original plan's primary target file does not exist. The real embed mechanism is the **`:block/link`** attribute on a block, rendered by `block-item-inner` / `block-container` in `src/main/frontend/components/block.cljs`.
+- **`:block/link` embeds already satisfy all three original goals** (recursive subtree with no depth limit, inline editing, reverse mapping to the original block's page file). Phase 1 confirmed this. So there is nothing to *build* for `:block/link` — only to *expose* the same path for `{{embed ((uuid))}}`.
+- **Schema is not what the v1 plan assumed.** There is no `:block/content`, `:block/left`, `:block/children`, `:block/file`, or `:block/lineno`. Content lives in `:block/title`; order in `:block/order`; children are the reverse of `:block/_parent`; owning page is `:block/page`. Files are regenerated **whole-page**, not by line-mapping individual blocks.
+- **`{{embed}}` deprecation is policy, not a technical impossibility.** The deprecation string lives in `src/resources/dicts/en.edn:127`. There is no architectural conflict forcing it.
+- **No Roam importer exists.** Import handlers cover EDN / sqlite / sqlite-zip / debug-transit only. Roam-JSON import was deleted; only a dead `(comment …)` Roam-JSON *export* remains (`handler/export.cljs:169-197`).
 
 ### Roam's 5 Fundamentals (ref: https://www.youtube.com/watch?v=P60-XvcIT5g)
-1. **Daily Notes** — temporal context (Logseq: fully supported)
-2. **Nesting (indenting)** — parent-child-sibling structure (Logseq: fully supported)
-3. **Pages [[]]** — conceptual connections (Logseq: fully supported)
-4. **Hashtags #** — contextual classification (Logseq: fully supported)
-5. **Block References & Transclusion** — atomic reuse + multi-context display (Logseq: ~75% supported)
+1. Daily Notes — Logseq: fully supported
+2. Nesting — Logseq: fully supported
+3. Pages `[[ ]]` — Logseq: fully supported
+4. Hashtags `#` — Logseq: fully supported
+5. Block References & Transclusion — Logseq `:block/link` works; **`{{embed ((uuid))}}` syntax is broken (deprecation warning)**. This is the gap this project closes.
 
-> This project aims to raise the 5th fundamental's support level from ~75% to ~95%+.
+## 2. Strategy
 
-## 2. Current Problems (Logseq vs Roam)
+**Chosen bridge: Render-time macro interception in `macro-cp` (Option 2).**
 
-### Block Embed Behavior Comparison
+`{{embed ((uuid))}}` is **inline body text**. `:block/link` is a **block-level, single-valued** `:db.type/ref` (schema `:db.cardinality/one`). Options that tried to convert the macro into a `:block/link` at parse/import time (Options 1 and 3) fight the data model: a block body like `"text {{embed ((uuid))}} more text"` cannot become the block's one `:block/link` without splitting the block or only handling the whole-body special case — both lossy and surprising.
 
-| Feature | Roam Research | Logseq (current) |
-|---------|---------------|-------------------|
-| Block self embed | Yes | Yes |
-| 1st-level child blocks display | Yes | Yes |
-| 2nd-level+ deep subtree rendering | Yes perfect | Incomplete/missing |
-| Inline editing within embed | Yes full | Often read-only |
-| Adding new child blocks within embed | Yes | Limited |
-| Real-time sync to original on edit | Yes | Limited |
+Instead, intercept the macro at render time. In `macro-cp` (`src/main/frontend/components/block.cljs:1677`), replace the unconditional deprecation branch at **L1740-1741** with logic that:
+1. Parses the first argument as `((uuid))` via `logseq.common.util.block-ref/get-block-ref-id` (UUID-only). If it is not a valid UUID → fall back to the existing deprecation warning (preserves behavior for non-block-embed usages).
+2. **Cycle guard:** reads a new `:embed-links` UUID set threaded through `config` (precedent: `page-reference` uses `:ref-set` at L1217-1218). If the UUID is already in the set → render a cycle warning (prevents `A embeds B, B embeds A` infinite recursion).
+3. Otherwise return `[block-container (-> config (assoc :embed? true :embed-id uuid) (update :embed-links (fnil conj #{}) uuid)) {:block/uuid uuid}]`.
 
-### Root Cause
-- Roam: DB is source of truth, recursive block tree rendering is straightforward
-- Logseq: Markdown files are source of truth, extracting and rendering block trees from files introduces constraints
+`block-container` (L4753) already async-fetches the block **and its children** (`db-async/<get-block` with default `:children? true`) and renders the full subtree via the **same code path** used by the `/Node embed` slash command. No schema, parser, importer, or outliner changes. No new block identities. No file rewrites. Estimated diff: ~15-25 lines in `block.cljs` plus an optional small helper and a CSS rule for a visual frame.
 
-## 3. Improvement Goals (3 Key Features)
+**Why not the other options:**
+- **Option 1 (parse-time transform to `:block/link`):** Cannot preserve inline-in-body semantics; would require splitting host blocks or only handling whole-body embeds; changes block identities; conflicts with the `:block/macros` model. Complexity LARGE.
+- **Option 3 (Roam import-time transform):** No Roam importer exists to attach to; would only help future imports, not existing graphs that already contain `{{embed ((uuid))}}`. Dismissed.
 
-### Goal 1: Full Recursive Subtree Rendering
-Render all children, grandchildren, great-grandchildren of an embedded block as a complete tree structure, matching Roam.
+## 3. Phases
 
-### Goal 2: Inline Editing Within Embed
-Enable direct click-to-edit on embedded blocks. Edits must sync with the original block.
+> Phases 0 and 1 are complete. The original 8-phase plan is replaced below.
 
-### Goal 3: Reverse Mapping (Edit to Source File)
-Ensure edits made within an embed are accurately reflected in the original Markdown file at the correct block location.
+- **Phase 0 — Dev environment + git init.** ✅ Done. Fork `hjlee918/logseq`, branch `feature/block-embed-improvement`, pnpm (not yarn) build verified, dev server on port 3001.
+- **Phase 1 — Codebase exploration.** ✅ Done. `CODE_MAP.md` (commit `35d92a133d`) mapped the corrected pipeline and overturned the original premise.
+- **Phase 1B — Deep investigation + re-scoping.** ✅ Done (this commit). Traced `{{embed}}` deprecation history, mapped the `:block/link` pipeline end-to-end, evaluated bridge options, documented edge cases, re-scoped the project.
+- **Phase 2 — Implement render-time bridge in `macro-cp`.** Replace the deprecation branch with the `block-container` dispatch + `:embed-links` cycle guard. Add optional `embed-block-cp` helper. Verify the embedded block's content + children render inline.
+- **Phase 3 — Visual frame + DOM fit.** Logseq block embeds have **no CSS** for `.embed-block` (unlike Roam's bordered box). Add a minimal wrapper/CSS rule so revived `{{embed}}` is visually distinguishable, matching Roam's presentation. Verify the inline `block_container` (renders as `.ls-block` with its own bullet/indent) sits acceptably inside a paragraph; wrap if needed.
+- **Phase 4 — Edge-case handling + testing.** Verify: multiple embeds of the same block; nested embeds (A→B→C, no cycle); true cycles (A↔B, guard fires); cross-page embeds; editing the `{{embed ((uuid))}}` text line to retarget (re-parses on save). Confirm graceful "block not found" warning for unresolved UUIDs.
+- **Phase 5 — Roam-UID consideration (optional, Supervisor decision).** Roam UIDs (`Oct-14-2020_1234`) don't match the strict UUID regex, so `{{embed ((roam-uid))}}` cannot resolve without a UID→UUID mapping. Since no Roam importer exists, this is out of scope unless the user supplies a separate import/migration step. Document and defer.
 
-## 4. Tech Stack
+## 4. Risk Assessment
 
-| Component | Technology |
-|-----------|------------|
-| Language | ClojureScript |
-| UI Framework | React (re-frame) |
-| Database | Datahike/Datalevin (Datalog) |
-| Desktop | Electron |
-| Build Tool | shadow-cljs |
-| Package Manager | yarn |
-| License | AGPL-3.0 |
+| Risk | Likelihood | Mitigation |
+|------|-----------|-----------|
+| `block_container` rendered inline inside a paragraph looks wrong (bullet/indent inside text flow) | Medium | Wrap in `[:div.embed-block …]`; add CSS. Verify against Roam's visual. Phase 3. |
+| Infinite recursion via `{{embed}}` cycles | Medium | `:embed-links` UUID set threaded through config, mirroring `:ref-set`. Phase 2. |
+| `:embed-links` vs reusing `:links` — mixing UUIDs and db/ids could over-suppress legitimate nested `:block/link` embeds | Low | Use a **separate** `:embed-links` UUID set (recommended), not the existing `:links` db-id set. |
+| Performance: every render resolves the macro and async-loads the block | Low | This is the same cost `/Node embed` already pays; acceptable. Monitor deep nesting. |
+| Large embeds (≥100 descendants) lazy-load instead of full-depth | Low | Pre-existing `:block/link` behavior (`initial_data.cljs:235`), not introduced by this change. Accept for now. |
+| Reversing an intentional deprecation may surprise upstream / future Logseq updates | Medium | This is a personal fork for the user's Roam data. Keep the change isolated and well-commented; preserve the deprecation warning as the fallback for non-UUID args. |
+| Roam UIDs don't resolve (no importer) | Known | Out of scope (Phase 5). Render graceful "block not found" warning. |
 
-## 5. Key Source Files to Analyze
+## 5. Testing Plan
 
-src/main/frontend/components/
-- block.cljs              : core block rendering component
-- block_embed.cljs        : block embed rendering (PRIMARY TARGET)
-- referenced_block.cljs   : referenced block display
-- node.cljs               : block node component
-
-src/main/frontend/db/
-- query_datalog.cljs      : Datalog queries (block tree retrieval)
-- model.cljs              : block data model
-- persist_db.cljs         : DB persistence
-
-src/main/frontend/handler/
-- editor.cljs             : edit event handlers
-- route.cljs              : page/block routing
-
-## 6. Phase-by-Phase Execution Plan
-
-### Phase 0: Dev Environment Setup + Git Init
-- Fork and clone Logseq repository
-- Install dev tools (JDK, Node.js, Clojure CLI, shadow-cljs, yarn)
-- Run local build and verify
-- Initialize Git, connect GitHub remote
-
-### Phase 1: Codebase Exploration
-- Analyze block embed rendering source code
-- Identify where subtree rendering is limited
-- Identify where editing is disabled
-
-### Phase 2: Data Model Analysis
-- Understand block tree query logic
-- Analyze child block retrieval Datalog queries
-- Understand block UUID to Markdown file line mapping
-
-### Phase 3: Recursive Subtree Rendering Implementation
-- Modify block_embed.cljs: recursively render all child blocks
-- Integrate with block.cljs: support full block rendering in embed context
-
-### Phase 4: Inline Editing in Embed
-- Enable edit mode for embedded blocks
-- Ensure edit events work correctly within embed context
-
-### Phase 5: Reverse Mapping Implementation
-- Map embed edits back to original Markdown file block location
-- Implement block UUID to file position mapping logic
-
-### Phase 6: Testing and Verification
-- Import Roam JSON/EDN data and verify embed behavior
-- Test block tree embeds at various nesting depths
-
-### Phase 7: Full Zettelkasten Structure Verification
-- Verify all 5 fundamentals compound correctly with Roam export data
-
-## 7. Success Criteria
-
-| Criterion | Current (Logseq) | Target |
-|-----------|-------------------|--------|
-| Embed subtree rendering depth | 1-2 levels limited | Unlimited (full tree) |
-| Editing within embed | Read-only | Full inline editing |
-| Edit to original sync | Limited | Perfect bidirectional sync |
-| Roam parity (block embed area) | ~75% | ~95%+ |
-
-## 8. References
-- Roam Zettelkasten 5 fundamentals: https://www.youtube.com/watch?v=P60-XvcIT5g
-- Logseq GitHub: https://github.com/logseq/logseq
-- Logseq Development Guide: https://github.com/logseq/logseq/blob/master/DEVELOPMENT.md
+1. **Unit/behavioral (manual, in dev server):**
+   - Create a block tree A → B → C (B child of A, C child of B). In another page, write `{{embed ((<A-uuid>))}}`. Verify the full A→B→C subtree renders inline.
+   - Cycle: A's body contains `{{embed ((B))}}`, B's body contains `{{embed ((A))}}`. Verify a cycle warning renders instead of hanging the renderer.
+   - Multiple embeds: embed the same block twice in one block body and in two different pages. Verify both render independently.
+   - Cross-page: embed a block from page X into page Y. Verify it renders and that editing inside the embed updates X's file.
+   - Editing the macro line: change the UUID in `{{embed ((uuid))}}` and save. Verify the rendered target updates on re-parse.
+   - Non-UUID arg: `{{embed ((not-a-uuid))}}` or `{{embed [[Some Page]]}}` still shows the existing deprecation/fallback behavior (no regression).
+2. **Reverse-mapping:** edit text inside an embedded block; confirm the original block's owning page Markdown file regenerates with the new content (existing `markdown-mirror` path, already works for `:block/link`).
+3. **Visual:** confirm the embed has a visible frame (Roam-like border) and does not break page layout at various nesting depths.
+4. **Regression:** existing `/Node embed` slash-command embeds still render and edit identically (the bridge reuses their code path; verify nothing shared was perturbed).
