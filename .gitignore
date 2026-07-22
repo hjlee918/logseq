@@ -63,3 +63,7 @@ deps/shui/.lsp
 deps/shui/.lsp-cache
 deps/shui/.clj-kondo
 deps/shui/shui-graph/logseq/bak
+
+# Phase 3B: personal Roam export + generated vault — never commit (fork is public)
+ROAM RESEARCH DATA/
+roam-vault/
