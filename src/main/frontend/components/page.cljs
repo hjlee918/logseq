@@ -487,7 +487,13 @@
              (let [config {:id "block-parent"
                            :block? true}]
                [:div.mb-4
-                (component-block/breadcrumb config repo block-id {:level-limit 3})]))
+                ;; Phase 3B: raise level-limit from 3 to 100 so the block-page
+                ;; breadcrumb shows the FULL upward parent chain (Goal 0: "must
+                ;; show full upward chain"), not just the nearest 3 ancestors
+                ;; with a static "⋯". get-block-parents caps traversal at the
+                ;; depth arg, so 100 is safe (no unbounded walk). Other
+                ;; breadcrumb callers keep the default level-limit 3.
+                (component-block/breadcrumb config repo block-id {:level-limit 100})]))
 
            ;; blocks
            (let [page (if block?
