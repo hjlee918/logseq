@@ -73,3 +73,7 @@ clj-e2e/resources
 clj-e2e/e2e-dump
 .dir-locals.el
 .projectile
+
+# Phase 3: personal Roam export + generated vault — never commit (fork is public)
+ROAM RESEARCH DATA/
+roam-vault/
