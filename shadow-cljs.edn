@@ -23,12 +23,13 @@
                         :code-editor
                         {:entries [frontend.extensions.code]
                          :depends-on #{:main}}
-                        :excalidraw
-                        {:entries [frontend.extensions.excalidraw]
-                         :depends-on #{:main}}
-                        :tldraw
-                        {:entries [frontend.extensions.tldraw]
-                         :depends-on #{:main}}}
+                        ;; Phase 3: excalidraw + tldraw module entries removed.
+                        ;; Their source namespaces (frontend.extensions.excalidraw /
+                        ;; .tldraw) were deleted in b3813ade7c (before fork point
+                        ;; 467c5200d6) but these shadow module entries were left
+                        ;; behind, breaking the :app build with
+                        ;; "required namespace ... not available".
+                        }
 
         :output-dir       "./static/js"
         :asset-path       "/static/js"
@@ -202,12 +203,9 @@
                          :code-editor
                          {:entries [frontend.extensions.code]
                           :depends-on #{:main}}
-                         :excalidraw
-                         {:entries [frontend.extensions.excalidraw]
-                          :depends-on #{:main}}
-                         :tldraw
-                         {:entries [frontend.extensions.tldraw]
-                          :depends-on #{:main}}}
+                         ;; Phase 3: excalidraw + tldraw entries removed (source
+                         ;; deleted in b3813ade7c, before fork point 467c5200d6).
+                         }
 
                :output-dir "./static/js/publishing"
                :asset-path "static/js"
