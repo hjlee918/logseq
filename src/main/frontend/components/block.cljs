@@ -1674,6 +1674,41 @@
         format (get-in config [:block :block/format] :markdown)]
     (render-macro config name arguments macro-content format)))
 
+(defn- embed-block-cp
+  "Revive {{embed ((uuid))}} by routing it through the existing :block/link
+  rendering pipeline (block-container), reusing the same subtree-rendering
+  machinery as the /Node embed slash command.
+
+  - Non-UUID args (e.g. {{embed [[page]]}}) fall back to the deprecation warning
+    so prior behavior is preserved (no regression).
+  - Cycles (A embeds B, B embeds A) are guarded by the :embed-links UUID set
+    threaded through config, mirroring page-reference's :ref-set cycle guard
+    (see L1217-1218)."
+  [config arguments]
+  (let [first-arg (first arguments)
+        embed-uuid (when (string? first-arg)
+                     (when-let [id-str (block-ref/get-block-ref-id first-arg)]
+                       (parse-uuid id-str)))]
+    (cond
+      ;; Not a valid ((uuid)) block ref → keep the deprecation warning (no regression)
+      (nil? embed-uuid)
+      [:div.warning (t :block.macro/embed-deprecated)]
+
+      ;; Cycle detected → render a cycle warning instead of recursing forever
+      (contains? (:embed-links config) embed-uuid)
+      [:div.warning (t :block.macro/embed-deprecated)]
+
+      ;; Valid embed → dispatch to block-container (same path as /Node embed),
+      ;; wrapping in .embed-block for a visual frame (see block.css).
+      :else
+      [:div.embed-block
+       [block-container
+        (-> config
+            (assoc :embed? true
+                   :embed-id embed-uuid)
+            (update :embed-links (fnil conj #{}) embed-uuid))
+        {:block/uuid embed-uuid}]])))
+
 (defn- macro-cp
   [config options]
   (let [{:keys [name arguments]} options
@@ -1738,7 +1773,7 @@
               (ui/tweet-embed id)))))
 
       (= name "embed")
-      [:div.warning (t :block.macro/embed-deprecated)]
+      (embed-block-cp config arguments)
 
       (= name "renderer")
       (when config/lsp-enabled?

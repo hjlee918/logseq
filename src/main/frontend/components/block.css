@@ -936,6 +936,14 @@ html.is-mobile .ls-block-content-indent {
   }
 }
 
+/* Visual frame for revived {{embed ((uuid))}} block embeds (routed through the
+   :block/link / block-container pipeline). Mirrors Roam's bordered box. */
+.embed-block {
+  border-left: 3px solid var(--ls-border-color, var(--rx-gray-05));
+  padding-left: 8px;
+  margin: 4px 0 4px 4px;
+}
+
 .block-properties, .page-properties {
   margin: 4px 0;
   padding: 4px 8px;
